@@ -15,4 +15,8 @@ path = "src/client/main.rs"
 [dependencies]
 clap = { version = "4.0.32", features = ["derive"] }
 rayon = "1.6.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "*", features = ["full"] }
+tokio-util = { version = "*", features = ["full"] }
+httparse = "*"
+futures-util = "*"
+bytes = "*"
