@@ -1,9 +1,10 @@
 extern crate clap;
 use clap::Parser;
-use tokio::{net::{TcpListener, TcpStream}, io::{BufReader, AsyncBufReadExt}};
+use tokio::{net::{TcpListener, TcpStream}};
 use tokio_util::codec::{BytesCodec, FramedRead};
-use httparse::{Request, Status};
+use httparse::{Request};
 use futures_util::stream::StreamExt;
+use std::option::Option;
 // use bytes::BytesMut;
 
 #[derive(Parser, Debug)]
@@ -11,37 +12,20 @@ struct Options {
     destination: String,
 }
 
+fn request_to_str(req: Request) -> String{
+    let mut s = "GET / HTTP/1.1\r\n".to_string();
+    
+    for h in req.headers {
+        s = s + h.name + ": " + &String::from_utf8_lossy(h.value) + "\r\n";
+    }
+
+    s = s + "\r\n";
+    s        
+}
+
 #[derive(Copy, Clone)]
 struct Proxy<'a> {
     dst: &'a str,
-}
-
-/**
- * Parse a HTTP headers
- */
-fn parse<'b>(buf: &'b[u8], req: &'b mut Request<'b, 'b>){
-    let res = req.parse(buf);    
-
-    match res {
-        Ok(_) => {
-            println!("{:?}",  String::from_utf8_lossy(req.headers[0].value));
-        }
-        Err(e) => println!("Error: {:?}", e)
-    }
-}
-
-async fn read_http_request<'b>(stream: &mut TcpStream) -> std::io::Result<()>{
-    let mut framed = FramedRead::new(stream, BytesCodec::new());
-    
-    while let Some(bytes) = framed.next().await{
-        let buf = bytes.unwrap();
-        let buf = buf.as_ref();
-        let mut headers = [httparse::EMPTY_HEADER; 16];
-        let mut req = Request::new(&mut headers);
-        parse(buf, &mut req);
-    }
-    
-    Ok(())
 }
 
 impl<'a> Proxy<'_> {
@@ -60,25 +44,62 @@ impl<'a> Proxy<'_> {
     }
     
     pub async fn handle_connection(&self, mut src: TcpStream) -> std::io::Result<()>{
-        // let mut dst = TcpStream::connect(self.dst).await?;
+        let mut dst = TcpStream::connect(self.dst).await?;
         
-        // let (mut src_r, mut src_w) = src.into_split();
-        // let (mut dst_r, mut dst_w) = dst.split();
+        let (mut dst_r, mut dst_w) = dst.split();
 
-        // TODO: modify header request
-        tokio::try_join!(read_http_request(&mut src))?;
+        // Modify header request
+        let mut buf = "".to_string();
+        let res = self.parse_http_request(&mut src).await;        
+        match res {
+            Ok(Some(res)) => buf = res,
+            Ok(None) => todo!(),
+            Err(_e) => println!("Error while parsing"), // TODO handle error properly
+        }
         
-        // let handle1 = async {
-        //     tokio::io::copy(&mut src_r, &mut dst_w).await
-        // };
+        // let req = res.unwrap().unwrap();
+        let mut buf = buf.as_bytes();
+        // println!("{:?}", String::from_utf8_lossy(buf));
         
-        // let handle2 = async {
-        //     tokio::io::copy(&mut dst_r, &mut src_w).await
-        // };
+        let handle1 = async {
+            tokio::io::copy(&mut buf, &mut dst_w).await
+        };
 
-        // tokio::try_join!(handle1, handle2)?;
+        // TODO modify the response
+        let (_src_r, mut src_w) = src.into_split();
+        let handle2 = async {
+            tokio::io::copy(&mut dst_r, &mut src_w).await
+        };
+
+        tokio::try_join!(handle1, handle2)?;
         
         Ok(())
+    }
+
+    async fn parse_http_request<'b>(&self, stream: &mut TcpStream) -> Result<Option<String>,  &'static str>{
+        let mut framed = FramedRead::new(stream, BytesCodec::new());
+        let mut modified_hdr = "".to_string();
+
+        // Read incoming data from the client
+        match framed.next().await.unwrap(){
+            Ok(bytes) => {
+                let mut headers = [httparse::EMPTY_HEADER; 16];
+                let mut req = Request::new(&mut headers);
+                // println!("{:?}", String::from_utf8_lossy(bytes.as_ref()));
+                let res = req.parse(bytes.as_ref());    
+                
+                match res {
+                    Ok(_) => {
+                        req.headers[0].value = self.dst.as_bytes(); // Change the address destination
+                        modified_hdr = request_to_str(req);         // Regenerate modified headers
+                    }
+                    Err(_e) => return Err("Failed to parse")
+                }
+            }
+            Err(_e) => return Err("Failed to read the buffer"),
+        }
+
+        Ok(Some(modified_hdr))
     }
 
 }
